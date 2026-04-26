@@ -199,7 +199,7 @@ if st.button("Check the Skies"):
         st.divider()
         current_drying_score = get_dry_score(is_day, temp, wind, humidity, raining, dewpoint)
 
-        if current_drying_score >= 60:
+        if current_drying_score >= 30:
             st.info ("**NOW** is a good time to dry!")
         else:
             st.info(get_next_good_drying_time(forecast_data))
