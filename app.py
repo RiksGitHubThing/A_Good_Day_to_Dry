@@ -97,8 +97,23 @@ def get_dry_score(is_day, temp, wind, humidity, rain, dew_point):
     if (not is_day or rain or (temp-dew_point < 2)):
         score = 0
     else:
-        score = (temp * 1.5) + (wind * 2 if wind < 40 else 0) + ((100 - humidity) * 1.0)
-   
+        #np points if it's too cold, but 1pt per deg above that
+        if temp < 2:
+            return 0
+        t_points = temp * 1.0
+        # upto 25 pts for winds up to 20mph, then negative pts over 30mph
+        effective_wind = min(wind, 20)
+        w_points = effective_wind * 1.25
+        if wind > 30:
+            w_points -= (wind - 30) * 2.5
+        # 45pts for zero humidity, no points for 100%
+        h_points = (100 - humidity) * 0.45
+
+        score = t_points + w_points + h_points
+    #return max 100 pts
+    return round(max(0, min(100, score)))
+
+
 
     score = max (0, min(100, score));
 
@@ -142,7 +157,7 @@ def estimate_drying_time(dewpoint, temp, humidity, wind_mph, fabric = "M"):
     
     total_mins *= (0.8 if fabric == "L" else 1.6 if fabric == "H" else 1.0)
     # return number of drying hours, or 'all day'
-    return max(16.0, round(total_mins / 60, 1))
+    return min(16.0, round(total_mins / 60, 1))
 #=========UI Stuff =========
 # st.write(move_forecast_to_dataframe(get_forecast_data("Walsall")))
 city = st.text_input("Where are your wet pants?")
@@ -175,6 +190,9 @@ if st.button("Check the Skies"):
         is_day = data['current']['is_day']
         raining = data['current']['precip_mm']
         dewpoint = data['current']['dewpoint_c']
+        # Fix for retrieving sunset time from forecastday,
+        # which is a list with one or more days (usually forecastday[0] is today)
+        sunset = data['forecast']['forecastday'][0]['astro']['sunset']
         #st.write (forecast_data)
         if not is_day:
             st.warning(f"##  🌕 Erm... Look out the window. It's night time")
@@ -196,14 +214,17 @@ if st.button("Check the Skies"):
         with card3:
             with st.container(border=True):
                 st.metric("💨 Wind Speed", f"{wind} mph")
-   
-        score_card, issue_card = st.columns(2)
-        with score_card:
+        if (not is_day or raining > 2 or temp <=0 or current_drying_score >75):
+            score_card, issue_card = st.columns(2)
+            with score_card:
+                with st.container(border=True):
+                    st.metric ("Current Drying Score", current_drying_score)
+            with issue_card:
+                with st.container(border=True):
+                    st.metric("You might want to watch out for...", "It's night" if not is_day else "It's raining" if raining > 0 else "It's freezing" if temp <= 2 else "Crispy Washing" if current_drying_score > 75 else "eldritch abominations")
+        else:
             with st.container(border=True):
-                st.metric ("Current Drying Score", current_drying_score)
-        with issue_card:
-            with st.container(border=True):
-                st.metric( "You might want to watch out for...", "It's night" if not is_day else "It's raining" if raining > 0 else "It's frozen" if temp <= 0 else "Crispy Washing" if current_drying_score > 75 else "pants stealing elves")
+                    st.metric ("Current Drying Score", current_drying_score)
         st.divider()
         if current_drying_score > 30:
             dry_light, dry_med, dry_heavy = st.columns(3)
@@ -221,6 +242,34 @@ if st.button("Check the Skies"):
                     st.metric ("Heavy Fabrics will dry in", f"{est_H} hours")
             if (est_L >= 10 or est_M >= 10 or est_H >= 10):
                 st.warning("Remember: Clothes drying for more than 10 hours will smell like a damp basement...")
+    # Check if the estimated drying finish times are after sunset and show a warning if so
+    try:
+        warnings = []
+            # sunset is expected in string format "HH:MM" or datetime
+        if isinstance(sunset, str):
+            # Combine date from 'now' and time from 'sunset'
+            sunset_time = datetime.strptime(sunset, "%H:%M").time()
+            sunset_dt = now.replace(hour=sunset_time.hour, minute=sunset_time.minute, second=0, microsecond=0)
+        else:
+            sunset_dt = sunset
+            # Compute finish times as datetimes
+            finish_L = now + pd.to_timedelta(est_L, unit="h")
+            finish_M = now + pd.to_timedelta(est_M, unit="h")
+            finish_H = now + pd.to_timedelta(est_H, unit="h")
+
+            after_sunset = None
+            if finish_L > sunset_dt:
+                after_sunset = "Light"
+            elif finish_M > sunset_dt:
+                after_sunset = "Medium"
+            elif finish_H > sunset_dt:
+                after_sunset = "Heavy"
+       
+
+            if after_sunset:
+                st.warning(f"Warning: {after_sunset} and thicker fabrics will not be dry before sunset!")
+    except Exception as e:
+        pass
     
     else:
         st.error("Are you sure that's a place?")
