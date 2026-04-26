@@ -224,7 +224,7 @@ if st.button("Check the Skies"):
     
     else:
         st.error("Are you sure that's a place?")
-        data_error = True
+        st.stop()
 
     st.header(f"Forecast for the next 24 hours")
     if data_error == False:
