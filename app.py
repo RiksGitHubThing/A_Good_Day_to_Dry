@@ -7,10 +7,12 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
-if "WEATHER_API_KEY" in st.secrets:
-    API_KEY = st.secrets["WEATHER_API_KEY"]
-else:
-    API_KEY = os.getenv("WEATHER_API_KEY")
+API_KEY = os.getenv("WEATHER_API_KEY")
+try:
+    if "WEATHER_API_KEY" in st.secrets:
+        API_KEY = st.secrets["WEATHER_API_KEY"]
+except Exception:
+    pass
 
 if not API_KEY:
     st.error("There's something wrong in my API Key")
@@ -114,6 +116,33 @@ def get_next_good_drying_time(forecast_data):
         formatted_next = (f"The next good time to dry is {formatted_next_time} on {formatted_next_date}")
     return formatted_next if formatted_next else None
 
+def estimate_drying_time(dewpoint, temp, humidity, wind_mph, fabric = "M"):
+    #arbitrary 90 mins for 25degC day, 30% humidity, 15mph wind
+    total_mins = 90
+    #check the dewpoint...
+    if temp - dewpoint < 2:
+         return 16.0
+    #if it's cold...
+    if temp < 2:
+        return 16.0
+
+    if temp < 25:
+        total_mins += (25-temp) * 10
+
+    #if it's humid...
+    if humidity > 30:
+        if humidity > 70:
+            total_mins += (humidity - 30) * 8 
+        else:
+            total_mins += (humidity - 30) * 3
+
+    #what if there's no wind?
+    if wind_mph < 15:
+        total_mins += (15 - wind_mph) * 8
+    
+    total_mins *= (0.8 if fabric == "L" else 1.6 if fabric == "H" else 1.0)
+    # return number of drying hours, or 'all day'
+    return max(16.0, round(total_mins / 60, 1))
 #=========UI Stuff =========
 # st.write(move_forecast_to_dataframe(get_forecast_data("Walsall")))
 city = st.text_input("Where are your wet pants?")
@@ -175,6 +204,24 @@ if st.button("Check the Skies"):
         with issue_card:
             with st.container(border=True):
                 st.metric( "You might want to watch out for...", "It's night" if not is_day else "It's raining" if raining > 0 else "It's frozen" if temp <= 0 else "Crispy Washing" if current_drying_score > 75 else "pants stealing elves")
+        st.divider()
+        if current_drying_score > 30:
+            dry_light, dry_med, dry_heavy = st.columns(3)
+            est_L = estimate_drying_time(dewpoint, temp, humidity, wind, "L")
+            est_M = estimate_drying_time(dewpoint, temp, humidity, wind, "M")
+            est_H = estimate_drying_time(dewpoint, temp, humidity, wind, "H")
+            with dry_light:
+                with st.container(border=True):
+                    st.metric ("Light Fabrics will dry in", f"{est_L} hours")
+            with dry_med:
+                with st.container(border=True):
+                    st.metric ("Medium Fabrics will dry in", f"{est_M} hours")
+            with dry_heavy:
+                with st.container(border=True):
+                    st.metric ("Heavy Fabrics will dry in", f"{est_H} hours")
+            if (est_L >= 10 or est_M >= 10 or est_H >= 10):
+                st.warning("Remember: Clothes drying for more than 10 hours will smell like a damp basement...")
+    
     else:
         st.error("Are you sure that's a place?")
         data_error = True
