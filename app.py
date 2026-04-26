@@ -7,7 +7,15 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
-API_KEY = os.getenv("WEATHER_API_KEY")
+if "WEATHER_API_KEY" in st.secrets:
+    API_KEY = st.secrets["WEATHER_API_KEY"]
+else:
+    API_KEY = os.getenv("WEATHER_API_KEY")
+
+if not API_KEY:
+    st.error("There's something wrong in my API Key")
+    st.stop()
+
 now = None
 here = None
 
