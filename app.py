@@ -1,3 +1,4 @@
+from pandas.core.arrays.timedeltas import truediv_object_array
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -113,23 +114,27 @@ def get_dry_score(is_day, temp, wind, humidity, rain, dew_point):
     #return max 100 pts
     return round(max(0, min(100, score)))
 
-
-
-    score = max (0, min(100, score));
-
-    return round(score)
-
 def get_next_good_drying_time(forecast_data):
     formatted_next = ""
-    next_good_drying_time = forecast_data.loc[forecast_data["Drying_Score"] >= 60].sort_values("time")
+    next_good_drying_time = forecast_data.loc[forecast_data["Drying_Score"] >= 30].sort_values("time")
     if next_good_drying_time.empty:
-        next_time = None
+        return None
     else:
         next_time = next_good_drying_time.iloc[0]["time"]
-        formatted_next_time = next_time.strftime("%H:%M") if now else "Unknown"
-        formatted_next_date = next_time.strftime("%A, %B %d %Y") if now else "Unknown"
+        formatted_next_time = next_time.strftime("%H:%M") if next_time else "Unknown"
+        formatted_next_date = next_time.strftime("%A, %B %d %Y") if next_time else "Unknown"
         formatted_next = (f"The next good time to dry is {formatted_next_time} on {formatted_next_date}")
     return formatted_next if formatted_next else None
+
+def how_long_until_it_rains(forecast_data):
+    next_rain_time = forecast_data.loc[forecast_data["precip_mm"] > 0].sort_values("time")
+    if next_rain_time.empty:
+        return 0
+    else:
+        next_rain = next_rain_time.iloc[0]["time"]
+        dt_rain = (next_rain - now).total_seconds()
+        return max(0, round(dt_rain/3600, 2))
+
 
 def estimate_drying_time(dewpoint, temp, humidity, wind_mph, fabric = "M"):
     #arbitrary 90 mins for 25degC day, 30% humidity, 15mph wind
@@ -158,8 +163,16 @@ def estimate_drying_time(dewpoint, temp, humidity, wind_mph, fabric = "M"):
     total_mins *= (0.8 if fabric == "L" else 1.6 if fabric == "H" else 1.0)
     # return number of drying hours, or 'all day'
     return min(16.0, round(total_mins / 60, 1))
+
+def hours_until_sunset(time_now, time_sunset):
+    dt = (time_sunset - time_now).total_seconds()
+    return max(0, dt/3600)
+
+
 #=========UI Stuff =========
 # st.write(move_forecast_to_dataframe(get_forecast_data("Walsall")))
+MIN_GOOD_DRYING_SCORE = 50
+
 city = st.text_input("Where are your wet pants?")
 
 if st.button("Check the Skies"):
@@ -189,20 +202,16 @@ if st.button("Check the Skies"):
         icon = data['current']['condition']['icon']
         is_day = data['current']['is_day']
         raining = data['current']['precip_mm']
-        dewpoint = data['current']['dewpoint_c']
-        # Fix for retrieving sunset time from forecastday,
-        # which is a list with one or more days (usually forecastday[0] is today)
+        dewpoint = data['current']['dewpoint_c']        
         sunset = data['forecast']['forecastday'][0]['astro']['sunset']
-        #st.write (forecast_data)
+        # take sunset datetime, strip out the time, take today's date, and smush it together.
+        remaining_day = hours_until_sunset(now, datetime.combine(now.date(), datetime.strptime(sunset, "%I:%M %p").time()))
         if not is_day:
             st.warning(f"##  🌕 Erm... Look out the window. It's night time")
         st.divider()
         current_drying_score = get_dry_score(is_day, temp, wind, humidity, raining, dewpoint)
+        hours_until_rain = how_long_until_it_rains(forecast_data)
 
-        if current_drying_score >= 30:
-            st.info ("**NOW** is a good time to dry!")
-        else:
-            st.info(get_next_good_drying_time(forecast_data))
 
         card1, card2, card3 = st.columns(3)
         with card1:
@@ -214,19 +223,29 @@ if st.button("Check the Skies"):
         with card3:
             with st.container(border=True):
                 st.metric("💨 Wind Speed", f"{wind} mph")
-        if (not is_day or raining > 2 or temp <=0 or current_drying_score >75):
+
+
+        if (not is_day or raining > 0 or temp <=2):
             score_card, issue_card = st.columns(2)
             with score_card:
                 with st.container(border=True):
                     st.metric ("Current Drying Score", current_drying_score)
+                    if current_drying_score <= MIN_GOOD_DRYING_SCORE:
+                        st.info(get_next_good_drying_time(forecast_data))
             with issue_card:
                 with st.container(border=True):
-                    st.metric("You might want to watch out for...", "It's night" if not is_day else "It's raining" if raining > 0 else "It's freezing" if temp <= 2 else "Crispy Washing" if current_drying_score > 75 else "eldritch abominations")
+                    st.metric("You might want to watch out for...", "It's night" if not is_day else "It's raining" if raining > 0 else "It's freezing")
+                    st.error("Best get the clothes horse set up...")
         else:
             with st.container(border=True):
+                    
                     st.metric ("Current Drying Score", current_drying_score)
+                    if current_drying_score > MIN_GOOD_DRYING_SCORE:
+                        st.success("Now is a good time to dry")
         st.divider()
-        if current_drying_score > 30:
+        if current_drying_score > MIN_GOOD_DRYING_SCORE:
+            with st.container(border=True):
+                st.metric ("Approximate hours of daylight left", f"{round(remaining_day, 2)} hours")
             dry_light, dry_med, dry_heavy = st.columns(3)
             est_L = estimate_drying_time(dewpoint, temp, humidity, wind, "L")
             est_M = estimate_drying_time(dewpoint, temp, humidity, wind, "M")
@@ -234,12 +253,36 @@ if st.button("Check the Skies"):
             with dry_light:
                 with st.container(border=True):
                     st.metric ("Light Fabrics will dry in", f"{est_L} hours")
+                    if est_L > remaining_day:
+                        st.error("🚨 Not enough hours in a day!")
+                    elif est_L < hours_until_rain:
+                        st.error("🌧️ It's expected to rain before then")
+                    elif est_L > remaining_day * 0.8:
+                        st.warning("⚠️ Almost the whole day!")
+                    else:
+                        st.success("☀️ These should be dry in no time")
             with dry_med:
                 with st.container(border=True):
                     st.metric ("Medium Fabrics will dry in", f"{est_M} hours")
+                    if est_M > remaining_day:
+                        st.error("🚨 Not enough hours in a day!")
+                    elif est_M < hours_until_rain:
+                        st.error("🌧️ It's expected to rain before then")
+                    elif est_M > remaining_day * 0.8:
+                        st.warning("⚠️ Almost the whole day!")
+                    else:
+                        st.success("☀️ These should be dry in no time")
             with dry_heavy:
                 with st.container(border=True):
                     st.metric ("Heavy Fabrics will dry in", f"{est_H} hours")
+                    if est_H > remaining_day:
+                        st.error("🚨 Not enough hours in a day!")
+                    elif est_H < hours_until_rain:
+                        st.error("🌧️ It's expected to rain before then")
+                    elif est_H > remaining_day * 0.8:
+                        st.warning("⚠️ Almost the whole day!")
+                    else:
+                        st.success("☀️ These should be dry in no time")
             if (est_L >= 10 or est_M >= 10 or est_H >= 10):
                 st.warning("Remember: Clothes drying for more than 10 hours will smell like a damp basement...")
     # Check if the estimated drying finish times are after sunset and show a warning if so
@@ -348,11 +391,11 @@ if st.button("Check the Skies"):
                 wind_fig = px.bar(
                     forecast_data,
                     x = "time",
-                    y = "wind_kph",
+                    y = "wind_mph",
                     title = None,
                 
                 )
-                wind_fig.update_yaxes(range=[0,100], title = "Kph")
+                wind_fig.update_yaxes(range=[0,100], title = "MPH")
                 wind_fig.update_xaxes(title="time")
                 wind_fig.update_layout(hovermode="x unified")
 
