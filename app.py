@@ -81,13 +81,16 @@ def move_forecast_to_dataframe(payload) -> pd.DataFrame:
     df["condition_text"] = df["condition"].apply(lambda c: c["text"])
     df["time"] = pd.to_datetime(df["time"])
     #st.write (df)
-    df["Drying_Score"] = df.apply(lambda row: get_dry_score(row["is_day"], row["temp_c"], row["wind_mph"], row["humidity"], row["precip_mm"], row["dewpoint_c"]), axis=1)
+    results = df.apply(lambda row: get_dry_score(row["is_day"], row["temp_c"], row["wind_mph"], row["humidity"], row["precip_mm"], row["dewpoint_c"]), axis=1)
+    df["Drying_Score"] = results.apply(lambda x: x[0])
+    df["Score_Reason"] = results.apply(lambda x: x[1])
+    df["Dealbreaker"] = results.apply(lambda x: x[2])
     df = df.sort_values("time")
     if now is None:
         set_now(payload)
     df_24 = df[df["time"] >= now].head(24)
     return df_24
-
+    
 def is_there_weather(condition_code):
     if condition_code not in (1000, 1003, 1006, 1009):
         return True
@@ -95,12 +98,20 @@ def is_there_weather(condition_code):
         return False
 
 def get_dry_score(is_day, temp, wind, humidity, rain, dew_point):
-    if (not is_day or rain or (temp-dew_point < 2)):
-        score = 0
-    else:
-        #np points if it's too cold, but 1pt per deg above that
-        if temp < 2:
-            return 0
+    t_points = 0
+    w_points = 0
+    h_points = 0
+    score = 0
+    dealbreaker = None
+    if not is_day:
+        dealbreaker = "it's night time"
+    if rain > 0:
+        dealbreaker = "it's raining"
+    if (temp - dew_point < 2):
+        dealbreaker = "there's a high risk of dew. Maybe Frost too"
+    if temp < 2:
+        dealbreaker = "its' freezing"
+    if not dealbreaker:
         t_points = temp * 1.0
         # upto 25 pts for winds up to 20mph, then negative pts over 30mph
         effective_wind = min(wind, 20)
@@ -112,7 +123,7 @@ def get_dry_score(is_day, temp, wind, humidity, rain, dew_point):
 
         score = t_points + w_points + h_points
     #return max 100 pts
-    return round(max(0, min(100, score)))
+    return round(max(0, min(100, score))), {"temp": t_points, "wind":w_points, "humidity":h_points}, dealbreaker
 
 def get_next_good_drying_time(forecast_data):
     formatted_next = ""
@@ -168,6 +179,14 @@ def hours_until_sunset(time_now, time_sunset):
     dt = (time_sunset - time_now).total_seconds()
     return max(0, dt/3600)
 
+def interpret_scores(element_scores):
+    score = {
+        "🌡️ It's really cold": element_scores['temp']/30,
+        "💨 There isn't enough breeze":element_scores['wind']/25,
+        "💧 The humidity is high": element_scores['humidity'] / 45
+    }
+    return min(score, key=score.get)
+    
 
 #=========UI Stuff =========
 # st.write(move_forecast_to_dataframe(get_forecast_data("Walsall")))
@@ -182,12 +201,7 @@ if st.button("Check the Skies"):
 
     if data:
         set_now(data)
-        set_here(data)
-        formatted_here = here.capitalize()
-        formatted_now = now.strftime("%H:%M") if now else "Unknown"
-        formatted_date = now.strftime("%A, %B %d %Y") if now else "Unknown"
-   
-        st.header(f"The current time in {formatted_here} is {formatted_now} on {formatted_date}")
+        
 
 
         forecast_data = move_forecast_to_dataframe(data)
@@ -204,12 +218,19 @@ if st.button("Check the Skies"):
         raining = data['current']['precip_mm']
         dewpoint = data['current']['dewpoint_c']        
         sunset = data['forecast']['forecastday'][0]['astro']['sunset']
-        # take sunset datetime, strip out the time, take today's date, and smush it together.
+        weather_now = data['current']['condition']['text']
+        
+        set_here(data)
+        formatted_here = here.capitalize()
+        formatted_now = now.strftime("%H:%M") if now else "Unknown"
+        formatted_date = now.strftime("%A, %B %d %Y") if now else "Unknown"
+   
+        st.header(f"The current time in {formatted_here} is {formatted_now} on {formatted_date}. ")
+        st.header(f"The forecast for the next hour is {weather_now}")
+
+
         remaining_day = hours_until_sunset(now, datetime.combine(now.date(), datetime.strptime(sunset, "%I:%M %p").time()))
-        if not is_day:
-            st.warning(f"##  🌕 Erm... Look out the window. It's night time")
-        st.divider()
-        current_drying_score = get_dry_score(is_day, temp, wind, humidity, raining, dewpoint)
+        current_drying_score, element_scores, dealbreaker = get_dry_score(is_day, temp, wind, humidity, raining, dewpoint)
         hours_until_rain = how_long_until_it_rains(forecast_data)
 
 
@@ -225,24 +246,20 @@ if st.button("Check the Skies"):
                 st.metric("💨 Wind Speed", f"{wind} mph")
 
 
-        if (not is_day or raining > 0 or temp <=2):
-            score_card, issue_card = st.columns(2)
-            with score_card:
-                with st.container(border=True):
-                    st.metric ("Current Drying Score", current_drying_score)
-                    if current_drying_score <= MIN_GOOD_DRYING_SCORE:
-                        st.info(get_next_good_drying_time(forecast_data))
-            with issue_card:
-                with st.container(border=True):
-                    st.metric("You might want to watch out for...", "It's night" if not is_day else "It's raining" if raining > 0 else "It's freezing")
-                    st.error("Best get the clothes horse set up...")
+        if dealbreaker:        
+            with st.container(border=True):
+                st.error(f"🚫 You can't dry now because {dealbreaker}")
         else:
             with st.container(border=True):
-                    
-                    st.metric ("Current Drying Score", current_drying_score)
-                    if current_drying_score > MIN_GOOD_DRYING_SCORE:
-                        st.success("Now is a good time to dry")
+                st.metric("**Current Drying Score**: ", current_drying_score)
+                if current_drying_score < MIN_GOOD_DRYING_SCORE:
+                    st.warning(f"{interpret_scores(element_scores)}")
+        if current_drying_score <= MIN_GOOD_DRYING_SCORE:
+            with st.container(border=True):
+                    st.info(f"⏳{get_next_good_drying_time(forecast_data)}")
+
         st.divider()
+
         if current_drying_score > MIN_GOOD_DRYING_SCORE:
             with st.container(border=True):
                 st.metric ("Approximate hours of daylight left", f"{round(remaining_day, 2)} hours")
@@ -412,15 +429,15 @@ if st.button("Check the Skies"):
         rain_graph, score_graph = st.columns(2)
         with rain_graph:
             with st.container(border=True):
-                st.subheader("Precipitation")
+                st.subheader("Chance of Rain")
                 precip_fig = px.bar(
                     forecast_data,
                     x = "time",
-                    y = "precip_mm",
+                    y = "chance_of_rain",
                     title = None,
                 
                 )
-                precip_fig.update_yaxes(range=[0,4], title = "mm")
+                precip_fig.update_yaxes(range=[0,100], title = "%")
                 precip_fig.update_xaxes(title="time")
                 precip_fig.update_layout(hovermode="x unified")
 
@@ -445,6 +462,14 @@ if st.button("Check the Skies"):
                     title = None,
                 
                 )
+                score_fig.add_hline(y=70, line_dash="dash", line_color="green", 
+                    annotation_text="Excellent", annotation_position="top left")
+
+                score_fig.add_hline(y=50, line_dash="dash", line_color="orange", 
+                    annotation_text="Good", annotation_position="top left")
+
+                score_fig.add_hline(y=30, line_dash="dash", line_color="red", 
+                    annotation_text="Meh", annotation_position="top left")
                 score_fig.update_yaxes(range=[0,100], title = "drying score")
                 score_fig.update_xaxes(title="time")
                 score_fig.update_layout(hovermode="x unified")
